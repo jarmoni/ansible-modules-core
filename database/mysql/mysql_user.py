@@ -321,7 +321,10 @@ def privileges_unpack(priv):
     for item in priv.strip().split('/'):
         pieces = item.strip().split(':')
         dbpriv = pieces[0].rsplit(".", 1)
-        pieces[0] = "`%s`.%s" % (dbpriv[0].strip('`'), dbpriv[1])
+        # Do not escape if privilege is for database '*' (all databases)
+        if dbpriv[0].strip('`') != '*':
+            pieces[0] = "`%s`.%s" % (dbpriv[0].strip('`'), dbpriv[1])
+
         if '(' in pieces[1]:
             output[pieces[0]] = re.split(r',\s*(?=[^)]*(?:\(|$))', pieces[1].upper())
             for i in output[pieces[0]]:

@@ -29,6 +29,7 @@ options:
   state:
     description:
       - Create or destroy the ELB
+    choices: ["present", "absent"]
     required: true
   name:
     description:
@@ -69,11 +70,6 @@ options:
       - An associative array of health check configuration settings (see example)
     require: false
     default: None
-  region:
-    description:
-      - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
-    required: false
-    aliases: ['aws_region', 'ec2_region']
   subnets:
     description:
       - A list of VPC subnets to use when creating ELB. Zones should be empty if using this.
@@ -121,7 +117,9 @@ options:
     required: false
     version_added: "2.0"
 
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = """
@@ -522,7 +520,7 @@ class ElbManager(object):
             for existing_listener in self.elb.listeners:
                 # Since ELB allows only one listener on each incoming port, a
                 # single match on the incoming port is all we're looking for
-                if existing_listener[0] == listener['load_balancer_port']:
+                if existing_listener[0] == int(listener['load_balancer_port']):
                     existing_listener_found = self._api_listener_as_tuple(existing_listener)
                     break
 
@@ -573,8 +571,8 @@ class ElbManager(object):
         # N.B. string manipulations on protocols below (str(), upper()) is to
         # ensure format matches output from ELB API
         listener_list = [
-            listener['load_balancer_port'],
-            listener['instance_port'],
+            int(listener['load_balancer_port']),
+            int(listener['instance_port']),
             str(listener['protocol'].upper()),
         ]
 

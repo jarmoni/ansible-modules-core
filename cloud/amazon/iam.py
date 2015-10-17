@@ -97,10 +97,12 @@ options:
     aliases: [ 'ec2_access_key', 'access_key' ]
 notes:
   - 'Currently boto does not support the removal of Managed Policies, the module will error out if your user/group/role has managed policies when you try to do state=absent. They will need to be removed manually.'
-author: 
+author:
     - "Jonathan I. Davila (@defionscode)"
     - "Paul Seiffert (@seiffert)"
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 '''
 
 EXAMPLES = '''
@@ -570,19 +572,25 @@ def main():
     result = {}
     changed = False
 
-    orig_group_list = [gl['group_name'] for gl in iam.get_all_groups().
-                       list_groups_result.
-                       groups]
-    orig_user_list = [ul['user_name'] for ul in iam.get_all_users().
-                      list_users_result.
-                      users]
-    orig_role_list = [rl['role_name'] for rl in iam.list_roles().list_roles_response.
-                      list_roles_result.
-                      roles]
-    orig_prof_list = [ap['instance_profile_name'] for ap in iam.list_instance_profiles().
-                      list_instance_profiles_response.
-                      list_instance_profiles_result.
-                      instance_profiles]
+    try:
+        orig_group_list = [gl['group_name'] for gl in iam.get_all_groups().
+                list_groups_result.
+                groups]
+
+        orig_user_list = [ul['user_name'] for ul in iam.get_all_users().
+                list_users_result.
+                users]
+
+        orig_role_list = [rl['role_name'] for rl in iam.list_roles().list_roles_response.
+                list_roles_result.
+                roles]
+
+        orig_prof_list = [ap['instance_profile_name'] for ap in iam.list_instance_profiles().
+                list_instance_profiles_response.
+                list_instance_profiles_result.
+                instance_profiles]
+    except boto.exception.BotoServerError, err:
+        module.fail_json(msg=err.message)
 
     if iam_type == 'user':
         been_updated = False

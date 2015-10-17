@@ -55,11 +55,6 @@ options:
     description:
       - A list of security groups into which instances should be found
     required: false
-  region:
-    description:
-      - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
-    required: false
-    aliases: ['aws_region', 'ec2_region']
   volumes:
     description:
       - a list of volume dicts, each containing device name and optionally ephemeral id or snapshot id. Size and type (and number of iops for io device type) must be specified for a new volume or a root volume, and may be passed for a snapshot volume. For any volume, a volume size less than 1 will be interpreted as a request not to create the volume.
@@ -77,7 +72,7 @@ options:
       - Kernel id for the EC2 instance
     required: false
     default: null
-    aliases: []    
+    aliases: []
   spot_price:
     description:
       - The spot price you are bidding. Only applies for an autoscaling group with spot instances.
@@ -124,11 +119,13 @@ options:
     version_added: "2.0"
   classic_link_vpc_security_groups:
     description:
-       - A list of security group id’s with which to associate the ClassicLink VPC instances.
+      - A list of security group id's with which to associate the ClassicLink VPC instances.
     required: false
     default: null
     version_added: "2.0"
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = '''
@@ -239,8 +236,29 @@ def create_launch_config(connection, module):
             module.fail_json(msg=str(e))
 
     result = dict(
-            ((a[0], a[1]) for a in vars(launch_configs[0]).items() if a[0] not in ('connection', 'created_time')))
+                 ((a[0], a[1]) for a in vars(launch_configs[0]).items()
+                  if a[0] not in ('connection', 'created_time', 'instance_monitoring', 'block_device_mappings'))
+                 )
     result['created_time'] = str(launch_configs[0].created_time)
+    # Looking at boto's launchconfig.py, it looks like this could be a boolean
+    # value or an object with an enabled attribute.  The enabled attribute
+    # could be a boolean or a string representation of a boolean.  Since
+    # I can't test all permutations myself to see if my reading of the code is
+    # correct, have to code this *very* defensively
+    if launch_configs[0].instance_monitoring is True:
+        result['instance_monitoring'] = True
+    else:
+        try:
+            result['instance_monitoring'] = module.boolean(launch_configs[0].instance_monitoring.enabled)
+        except AttributeError:
+            result['instance_monitoring'] = False
+    if launch_configs[0].block_device_mappings is not None:
+        result['block_device_mappings'] = []
+        for bdm in launch_configs[0].block_device_mappings:
+            result['block_device_mappings'].append(dict(device_name=bdm.device_name, virtual_name=bdm.virtual_name))
+            if bdm.ebs is not None:
+                result['block_device_mappings'][-1]['ebs'] = dict(snapshot_id=bdm.ebs.snapshot_id, volume_size=bdm.ebs.volume_size)
+
 
     module.exit_json(changed=changed, name=result['name'], created_time=result['created_time'],
                      image_id=result['image_id'], arn=result['launch_configuration_arn'],

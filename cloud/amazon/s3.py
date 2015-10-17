@@ -93,6 +93,12 @@ options:
       - Keyname of the object inside the bucket. Can be used to create "virtual directories", see examples.
     required: false
     default: null
+  permission:
+    description:
+      - This option let's the user set the canned permissions on the object/bucket that are created. The permissions that can be set are 'private', 'public-read', 'public-read-write', 'authenticated-read'. Multiple permissions can be specified as a list.
+    required: false
+    default: private
+    version_added: "2.0"
   prefix:
     description:
       - Limits the response to keys that begin with the specified prefix for list mode
@@ -167,7 +173,7 @@ EXAMPLES = '''
 - s3: bucket=mybucket mode=list prefix=/my/desired/ marker=/my/desired/0023.txt max_keys=472
 
 # Create an empty bucket
-- s3: bucket=mybucket mode=create
+- s3: bucket=mybucket mode=create permission=public-read
 
 # Create a bucket with key as directory, in the EU region
 - s3: bucket=mybucket object=/my/directory/path mode=create region=eu-west-1
@@ -192,6 +198,7 @@ try:
     from boto.s3.connection import Location
     from boto.s3.connection import OrdinaryCallingFormat
     from boto.s3.connection import S3Connection
+    from boto.s3.acl import CannedACLStrings
     HAS_BOTO = True
 except ImportError:
     HAS_BOTO = False
@@ -236,6 +243,8 @@ def create_bucket(module, s3, bucket, location=None):
         location = Location.DEFAULT
     try:
         bucket = s3.create_bucket(bucket, location=location)
+        for acl in module.params.get('permission'):
+            bucket.set_acl(acl)
     except s3.provider.storage_response_error, e:
         module.fail_json(msg= str(e))
     if bucket:
@@ -281,15 +290,6 @@ def create_dirkey(module, s3, bucket, obj):
     except s3.provider.storage_response_error, e:
         module.fail_json(msg= str(e))
 
-def upload_file_check(src):
-    if os.path.exists(src):
-        file_exists is True
-    else:
-        file_exists is False
-    if os.path.isdir(src):
-        module.fail_json(msg="Specifying a directory is not a valid source for upload.", failed=True)
-    return file_exists
-
 def path_check(path):
     if os.path.exists(path):
         return True
@@ -306,6 +306,8 @@ def upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, heade
                 key.set_metadata(meta_key, metadata[meta_key])
 
         key.set_contents_from_filename(src, encrypt_key=encrypt, headers=headers)
+        for acl in module.params.get('permission'):
+            key.set_acl(acl)
         url = key.generate_url(expiry)
         module.exit_json(msg="PUT operation complete", url=url, changed=True)
     except s3.provider.storage_copy_error, e:
@@ -378,6 +380,7 @@ def main():
             metadata       = dict(type='dict'),
             mode           = dict(choices=['get', 'put', 'delete', 'create', 'geturl', 'getstr', 'delobj', 'list'], required=True),
             object         = dict(),
+            permission     = dict(type='list', default=['private']),
             version        = dict(default=None),
             overwrite      = dict(aliases=['force'], default='always'),
             prefix         = dict(default=None),
@@ -408,6 +411,10 @@ def main():
     retries = module.params.get('retries')
     s3_url = module.params.get('s3_url')
     src = module.params.get('src')
+
+    for acl in module.params.get('permission'):
+        if acl not in CannedACLStrings:
+            module.fail_json(msg='Unknown permission specified: %s' % str(acl))
 
     if overwrite not in  ['always', 'never', 'different']:
         if module.boolean(overwrite):
@@ -479,7 +486,7 @@ def main():
         # First, we check to see if the bucket exists, we get "bucket" returned.
         bucketrtn = bucket_check(module, s3, bucket)
         if bucketrtn is False:
-            module.fail_json(msg="Target bucket cannot be found", failed=True)
+            module.fail_json(msg="Source bucket cannot be found", failed=True)
 
         # Next, we check to see if the key in the bucket exists. If it exists, it also returns key_matches md5sum check.
         keyrtn = key_check(module, s3, bucket, obj, version=version)

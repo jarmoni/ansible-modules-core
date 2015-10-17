@@ -67,7 +67,7 @@ options:
       - Number of instances you'd like to replace at a time.  Used with replace_all_instances.
     required: false
     version_added: "1.8"
-    default: 1  
+    default: 1
   replace_instances:
     description:
       - List of instance_ids belonging to the named ASG that you would like to terminate and be replaced with instances matching the current launch configuration.
@@ -80,11 +80,6 @@ options:
     required: false
     version_added: "1.8"
     default: True
-  region:
-    description:
-      - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
-    required: false
-    aliases: ['aws_region', 'ec2_region']
   vpc_zone_identifier:
     description:
       - List of VPC subnets to use
@@ -111,7 +106,7 @@ options:
     choices: ['EC2', 'ELB']
   default_cooldown:
     description:
-        - The number of seconds after a scaling activity completes before another can begin.
+      - The number of seconds after a scaling activity completes before another can begin.
     required: false
     default: 300 seconds
     version_added: "2.0"
@@ -126,7 +121,17 @@ options:
     version_added: "1.9"
     default: yes
     required: False
-extends_documentation_fragment: aws
+  termination_policies:
+    description:
+        - An ordered list of criteria used for selecting instances to be removed from the Auto Scaling group when reducing capacity.
+        - For 'Default', when used to create a new autoscaling group, the "Default" value is used. When used to change an existent autoscaling group, the current termination policies are mantained
+    required: false
+    default: Default
+    choices: ['OldestInstance', 'NewestInstance', 'OldestLaunchConfiguration', 'ClosestToNextInstanceHour', 'Default']
+    version_added: "2.0"
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = '''
@@ -250,9 +255,10 @@ def get_properties(autoscaling_group):
     properties['viable_instances'] = 0
     properties['terminating_instances'] = 0
 
+    instance_facts = {}
+
     if autoscaling_group.instances:
         properties['instances'] = [i.instance_id for i in autoscaling_group.instances]
-        instance_facts = {}
         for i in autoscaling_group.instances:
             instance_facts[i.instance_id] = {'health_status': i.health_status,
                                             'lifecycle_state': i.lifecycle_state,
@@ -269,7 +275,7 @@ def get_properties(autoscaling_group):
                 properties['terminating_instances'] += 1
             if i.lifecycle_state == 'Pending':
                 properties['pending_instances'] += 1
-        properties['instance_facts'] = instance_facts
+    properties['instance_facts'] = instance_facts
     properties['load_balancers'] = autoscaling_group.load_balancers
 
     if getattr(autoscaling_group, "tags", None):
@@ -384,6 +390,7 @@ def create_autoscaling_group(connection, module):
     wait_for_instances = module.params.get('wait_for_instances')
     as_groups = connection.get_all_groups(names=[group_name])
     wait_timeout = module.params.get('wait_timeout')
+    termination_policies = module.params.get('termination_policies')
 
     if not vpc_zone_identifier and not availability_zones:
         region, ec2_url, aws_connect_params = get_aws_connection_info(module)
@@ -421,7 +428,8 @@ def create_autoscaling_group(connection, module):
                  tags=asg_tags,
                  health_check_period=health_check_period,
                  health_check_type=health_check_type,
-                 default_cooldown=default_cooldown)
+                 default_cooldown=default_cooldown,
+                 termination_policies=termination_policies)
 
         try:
             connection.create_auto_scaling_group(ag)
@@ -783,7 +791,8 @@ def main():
             health_check_period=dict(type='int', default=300),
             health_check_type=dict(default='EC2', choices=['EC2', 'ELB']),
             default_cooldown=dict(type='int', default=300),
-            wait_for_instances=dict(type='bool', default=True)
+            wait_for_instances=dict(type='bool', default=True),
+            termination_policies=dict(type='list', default='Default')
         ),
     )
     

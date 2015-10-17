@@ -97,9 +97,12 @@ options:
       - You can specify a different logging driver for the container than for the daemon.
         "json-file" Default logging driver for Docker. Writes JSON messages to file.
         docker logs command is available only for this logging driver.
-        "none" disables any logging for the container. docker logs won't be available with this driver.
+        "none" disables any logging for the container.
         "syslog" Syslog logging driver for Docker. Writes log messages to syslog.
         docker logs command is not available for this logging driver.
+        "journald" Journald logging driver for Docker. Writes log messages to "journald".
+        "gelf" Graylog Extended Log Format (GELF) logging driver for Docker. Writes log messages to a GELF endpoint likeGraylog or Logstash.
+        "fluentd" Fluentd logging driver for Docker. Writes log messages to "fluentd" (forward input).
         If not defined explicitly, the Docker daemon's default ("json-file") will apply.
         Requires docker >= 1.6.0.
     required: false
@@ -108,6 +111,17 @@ options:
       - json-file
       - none
       - syslog
+      - journald
+      - gelf
+      - fluentd
+    version_added: "2.0"
+  log_opt:
+    description:
+      - Additional options to pass to the logging driver selected above. See Docker `log-driver 
+        <https://docs.docker.com/reference/logging/overview/>` documentation for more information.
+        Requires docker >=1.7.0.
+    required: false
+    default: null
     version_added: "2.0"
   memory_limit:
     description:
@@ -268,7 +282,7 @@ options:
   read_only:
     description:
       - Mount the container's root filesystem as read only
-    default: false
+    default: null
     aliases: []
     version_added: "2.0"
   restart_policy:
@@ -415,6 +429,19 @@ EXAMPLES = '''
     name: ohno
     image: someuser/oldandbusted
     state: absent
+
+# Example Syslogging Output
+
+- name: myservice container
+  docker:
+    name: myservice
+    image: someservice/someimage
+    state: reloaded
+    log_driver: syslog
+    log_opt:
+      syslog-address: tcp://my-syslog-server:514
+      syslog-facility: daemon
+      syslog-tag: myservice
 '''
 
 HAS_DOCKER_PY = True
@@ -570,6 +597,7 @@ class DockerManager(object):
             'extra_hosts': ((0, 7, 0), '1.3.1'),
             'pid': ((1, 0, 0), '1.17'),
             'log_driver': ((1, 2, 0), '1.18'),
+            'log_opt': ((1, 2, 0), '1.18'),
             'host_config': ((0, 7, 0), '1.15'),
             'cpu_set': ((0, 6, 0), '1.14'),
             'cap_add': ((0, 5, 0), '1.14'),
@@ -796,12 +824,12 @@ class DockerManager(object):
             'privileged': self.module.params.get('privileged'),
             'links': self.links,
             'network_mode': self.module.params.get('net'),
-            'read_only': self.module.params.get('read_only'),
         }
 
         optionals = {}
         for optional_param in ('dns', 'volumes_from', 'restart_policy',
-                'restart_policy_retry', 'pid'):
+                'restart_policy_retry', 'pid', 'extra_hosts', 'log_driver',
+                'cap_add', 'cap_drop', 'read_only', 'log_opt'):
             optionals[optional_param] = self.module.params.get(optional_param)
 
         if optionals['dns'] is not None:
@@ -818,13 +846,42 @@ class DockerManager(object):
             if params['restart_policy']['Name'] == 'on-failure':
                 params['restart_policy']['MaximumRetryCount'] = optionals['restart_policy_retry']
 
+        # docker_py only accepts 'host' or None
+        if 'pid' in optionals and not optionals['pid']:
+            optionals['pid'] = None
+
         if optionals['pid'] is not None:
             self.ensure_capability('pid')
             params['pid_mode'] = optionals['pid']
 
+        if optionals['extra_hosts'] is not None:
+            self.ensure_capability('extra_hosts')
+            params['extra_hosts'] = optionals['extra_hosts']
+
+        if optionals['log_driver'] is not None:
+            self.ensure_capability('log_driver')
+            log_config = docker.utils.LogConfig(type=docker.utils.LogConfig.types.JSON)
+            if optionals['log_opt'] is not None:
+                for k, v in optionals['log_opt'].iteritems():
+                    log_config.set_config_value(k, v)
+            log_config.type = optionals['log_driver']
+            params['log_config'] = log_config
+
+        if optionals['cap_add'] is not None:
+            self.ensure_capability('cap_add')
+            params['cap_add'] = optionals['cap_add']
+
+        if optionals['cap_drop'] is not None:
+            self.ensure_capability('cap_drop')
+            params['cap_drop'] = optionals['cap_drop']
+
+        if optionals['read_only'] is not None:
+            self.ensure_capability('read_only')
+            params['read_only'] = optionals['read_only']
+
         return params
 
-    def get_host_config(self):
+    def create_host_config(self):
         """
         Create HostConfig object
         """
@@ -1005,11 +1062,11 @@ class DockerManager(object):
                     continue
 
             # EXPOSED PORTS
-            expected_exposed_ports = set((image['ContainerConfig']['ExposedPorts'] or {}).keys())
+            expected_exposed_ports = set((image['ContainerConfig'].get('ExposedPorts') or {}).keys())
             for p in (self.exposed_ports or []):
                 expected_exposed_ports.add("/".join(p))
 
-            actually_exposed_ports = set((container["Config"]["ExposedPorts"] or {}).keys())
+            actually_exposed_ports = set((container["Config"].get("ExposedPorts") or {}).keys())
 
             if actually_exposed_ports != expected_exposed_ports:
                 self.reload_reasons.append('exposed_ports ({0} => {1})'.format(actually_exposed_ports, expected_exposed_ports))
@@ -1020,7 +1077,7 @@ class DockerManager(object):
 
             expected_volume_keys = set((image['ContainerConfig']['Volumes'] or {}).keys())
             if self.volumes:
-                expected_volume_keys.update(self.volumes.keys())
+                expected_volume_keys.update(self.volumes)
 
             actual_volume_keys = set((container['Config']['Volumes'] or {}).keys())
 
@@ -1236,13 +1293,24 @@ class DockerManager(object):
 
             # LOG_DRIVER
 
-            if self.ensure_capability('log_driver', False) :
+            if self.ensure_capability('log_driver', False):
                 expected_log_driver = self.module.params.get('log_driver') or 'json-file'
                 actual_log_driver = container['HostConfig']['LogConfig']['Type']
                 if actual_log_driver != expected_log_driver:
                     self.reload_reasons.append('log_driver ({0} => {1})'.format(actual_log_driver, expected_log_driver))
                     differing.append(container)
                     continue
+
+            if self.ensure_capability('log_opt', False):
+                expected_logging_opts = self.module.params.get('log_opt') or {}
+                actual_log_opts = container['HostConfig']['LogConfig']['Config']
+                if len(set(expected_logging_opts.items()) - set(actual_log_opts.items())) != 0:
+                    log_opt_reasons = {
+                        'added': dict(set(expected_logging_opts.items()) - set(actual_log_opts.items())),
+                        'removed': dict(set(actual_log_opts.items()) - set(expected_logging_opts.items()))
+                    }
+                    self.reload_reasons.append('log_opt ({0})'.format(log_opt_reasons))
+                    differing.append(container)
 
         return differing
 
@@ -1324,6 +1392,11 @@ class DockerManager(object):
             changes = list(self.client.pull(image, tag=tag, stream=True, **extra_params))
             try:
                 last = changes[-1]
+                # seems Docker 1.8 puts an empty dict at the end of the
+                # stream; catch that and get the previous instead
+                # https://github.com/ansible/ansible-modules-core/issues/2043
+                if last.strip() == '{}':
+                    last = changes[-2]
             except IndexError:
                 last = '{}'
             status = json.loads(last).get('status', '')
@@ -1340,76 +1413,17 @@ class DockerManager(object):
         except Exception as e:
             self.module.fail_json(msg="Failed to pull the specified image: %s" % resource, error=repr(e))
 
-    def create_host_config(self):
-        params = {
-            'lxc_conf': self.lxc_conf,
-            'binds': self.binds,
-            'port_bindings': self.port_bindings,
-            'publish_all_ports': self.module.params.get('publish_all_ports'),
-            'privileged': self.module.params.get('privileged'),
-            'links': self.links,
-            'network_mode': self.module.params.get('net'),
-        }
-
-        optionals = {}
-        for optional_param in ('dns', 'volumes_from', 'restart_policy',
-                'restart_policy_retry', 'pid', 'extra_hosts', 'log_driver',
-                'cap_add', 'cap_drop'):
-            optionals[optional_param] = self.module.params.get(optional_param)
-
-        if optionals['dns'] is not None:
-            self.ensure_capability('dns')
-            params['dns'] = optionals['dns']
-
-        if optionals['volumes_from'] is not None:
-            self.ensure_capability('volumes_from')
-            params['volumes_from'] = optionals['volumes_from']
-
-        if optionals['restart_policy'] is not None:
-            self.ensure_capability('restart_policy')
-            params['restart_policy'] = { 'Name': optionals['restart_policy'] }
-            if params['restart_policy']['Name'] == 'on-failure':
-                params['restart_policy']['MaximumRetryCount'] = optionals['restart_policy_retry']
-
-        # docker_py only accepts 'host' or None
-        if 'pid' in optionals and not optionals['pid']:
-            optionals['pid'] = None
-
-        if optionals['pid'] is not None:
-            self.ensure_capability('pid')
-            params['pid_mode'] = optionals['pid']
-
-        if optionals['extra_hosts'] is not None:
-            self.ensure_capability('extra_hosts')
-            params['extra_hosts'] = optionals['extra_hosts']
-
-        if optionals['log_driver'] is not None:
-            self.ensure_capability('log_driver')
-            log_config = docker.utils.LogConfig(type=docker.utils.LogConfig.types.JSON)
-            log_config.type = optionals['log_driver']
-            params['log_config'] = log_config
-
-        if optionals['cap_add'] is not None:
-            self.ensure_capability('cap_add')
-            params['cap_add'] = optionals['cap_add']
-
-        if optionals['cap_drop'] is not None:
-            self.ensure_capability('cap_drop')
-            params['cap_drop'] = optionals['cap_drop']
-
-        return docker.utils.create_host_config(**params)
-
     def create_containers(self, count=1):
         try:
             mem_limit = _human_to_bytes(self.module.params.get('memory_limit'))
         except ValueError as e:
             self.module.fail_json(msg=str(e))
+        api_version = self.client.version()['ApiVersion']
 
         params = {'image':        self.module.params.get('image'),
                   'command':      self.module.params.get('command'),
                   'ports':        self.exposed_ports,
                   'volumes':      self.volumes,
-                  'mem_limit':    mem_limit,
                   'environment':  self.env,
                   'hostname':     self.module.params.get('hostname'),
                   'domainname':   self.module.params.get('domainname'),
@@ -1418,12 +1432,17 @@ class DockerManager(object):
                   'stdin_open':   self.module.params.get('stdin_open'),
                   'tty':          self.module.params.get('tty'),
                   'cpuset':       self.module.params.get('cpu_set'),
-                  'host_config':  self.create_host_config(),
                   'user':         self.module.params.get('docker_user'),
                   }
-
         if self.ensure_capability('host_config', fail=False):
-            params['host_config'] = self.get_host_config()
+            params['host_config'] = self.create_host_config()
+
+        #For v1.19 API and above use HostConfig, otherwise use Config
+        if api_version < 1.19:
+            params['mem_limit'] = mem_limit
+        else:
+            params['host_config']['Memory'] = mem_limit
+
 
         def do_create(count, params):
             results = []
@@ -1654,11 +1673,12 @@ def main():
             net             = dict(default=None),
             pid             = dict(default=None),
             insecure_registry = dict(default=False, type='bool'),
-            log_driver      = dict(default=None, choices=['json-file', 'none', 'syslog']),
+            log_driver      = dict(default=None, choices=['json-file', 'none', 'syslog', 'journald', 'gelf', 'fluentd']),
+            log_opt         = dict(default=None, type='dict'),
             cpu_set         = dict(default=None),
             cap_add         = dict(default=None, type='list'),
             cap_drop        = dict(default=None, type='list'),
-            read_only       = dict(default=False, type='bool'),
+            read_only       = dict(default=None, type='bool'),
         ),
         required_together = (
             ['tls_client_cert', 'tls_client_key'],
